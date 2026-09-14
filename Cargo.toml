@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "crates/gix-types",
+    "crates/gix-core",
+]
+resolver = "2"
+
+[profile.dev]
+debug = 0
+strip = "debuginfo"
