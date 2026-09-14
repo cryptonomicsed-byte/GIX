@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 // ── GIX-FOLD-v1 glyph encoding ───────────────────────────────────────────────
 
@@ -163,6 +163,13 @@ pub fn gix1_merkle_root(canonical_ids: &[&str]) -> String {
         layer = next;
     }
     hex::encode(layer[0])
+}
+
+/// Alias for [`gix1_merkle_root`] — matches the `merkle_root` name used by
+/// larql-glyph so callers can migrate without renaming call sites.
+#[inline]
+pub fn merkle_root(canonical_ids: &[&str]) -> String {
+    gix1_merkle_root(canonical_ids)
 }
 
 /// Audit a GIX1 index: verify that the stored root matches a recomputed root

@@ -1,0 +1,27 @@
+[protocol]
+name        = "GIX"
+role        = "content-addressed-graph-primitives"
+version     = "0.1.0"
+port        = 0          # library only, no server
+
+[crates]
+gix-types   = "canonical GlyphNode, GlyphEdge, GixKind, Gix1Entry, GIX1_EMPTY_ROOT, content_hash, glyph_fold, odu_link, merkle_root (alias), gix1_merkle_root, gix1_audit"
+gix-core    = "GlyphGraph (add_node/add_edge/get_node/describe/select_by_odu/select_by_tag/walk/infer_related), Gix1Index (Merkle-auditable index) — re-exports all gix-types public API"
+
+[algorithm]
+fold        = "GIX-FOLD-v1: SHA-256 → deterministic BMP Unicode codepoint via range-reduced modular arithmetic (identical to If-Script/src/glyph and larql-glyph)"
+odu_link    = "base = digest[0], composed = digest[0]<<8 | digest[1]"
+merkle      = "sort-then-hash Merkle reduction (sort before hashing = insertion-order independent); empty root = SHA-256 of empty string"
+
+[consumers]
+"Omo-Koda2/omokoda-core" = "path deps already wired: gix-core = { path = '../../GIX/crates/gix-core' } and gix-types (gaps #62)"
+"If-Script/src/glyph"    = "same GIX-FOLD-v1 algorithm, different API shape ([u8;32] raw digest vs hex String); canonical frozen vectors live in If-Script tests — do not migrate"
+"larql-glyph (GitHub)"   = "richer GlyphGraph API (merge, infer_shared_odu, JSON serialization, describe with edge structs, Walrus-style merkle_root(pairs)); glyph_memory.rs stays on larql-glyph git pin — incompatible merkle_root signature ((String,[u8;32])[] vs &[&str])"
+
+[gaps_closed]
+"#59" = "GIX workspace created as canonical source for GIX1 wire primitives"
+"#60" = "gix-types: GlyphNode, GlyphEdge, GixKind, Gix1Entry, gix1_merkle_root, gix1_audit, merkle_root alias"
+"#61" = "larql-glyph git rev pin confirmed in omokoda-core; local larql repo absent; migration blocked by incompatible API (see consumers note)"
+"#62" = "gix-core path dep already wired in Omo-Koda2/omokoda-core/Cargo.toml"
+"#63" = "GlyphGraph with DESCRIBE/SELECT/WALK/INFER in gix-core/src/graph.rs"
+"#64" = "Gix1Index Merkle audit index in gix-core/src/index.rs"
