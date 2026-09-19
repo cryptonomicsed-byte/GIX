@@ -31,6 +31,8 @@ impl GlyphGraph {
 
     pub fn node_count(&self) -> usize { self.nodes.len() }
     pub fn edge_count(&self) -> usize { self.edges.len() }
+    pub fn edges(&self) -> &BTreeSet<GlyphEdge> { &self.edges }
+    pub fn nodes(&self) -> impl Iterator<Item = &GlyphNode> { self.nodes.values() }
 
     // ── LQL verbs ─────────────────────────────────────────────────────────────
 

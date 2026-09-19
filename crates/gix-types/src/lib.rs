@@ -94,6 +94,9 @@ pub struct GlyphEdge {
 #[serde(rename_all = "snake_case")]
 pub enum GixKind {
     Memory,
+    /// A REM-compressed memory fold: multiple low-importance `Memory` entries
+    /// collapsed into a single macro-node by the Triune-Memory REM cycle.
+    MemoryFold,
     Receipt,
     Simulation,
     Physical,
@@ -377,6 +380,57 @@ pub fn gix_fold_v1(inputs: &[[u8; 32]]) -> [u8; 32] {
     h.finalize().into()
 }
 
+// ── GixFold — REM-compressed memory fold wire type ───────────────────────────
+
+/// Wire type for a REM-compressed memory fold.
+///
+/// Created by the Triune-Memory REM cycle when multiple low-importance
+/// `GixKind::Memory` entries are folded into a single macro-node.
+/// The `id` is `gix_fold_v1(sources)` — deterministic, order-dependent.
+///
+/// Register in `Gix1Index` with `GixKind::MemoryFold` so the fold appears
+/// in Merkle roots alongside raw memory entries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GixFold {
+    /// Composite canonical_id: `gix_fold_v1` over all source canonical_ids.
+    pub id:                [u8; 32],
+    /// The source canonical_ids that were compressed into this fold.
+    pub sources:           Vec<[u8; 32]>,
+    /// Compression ratio: number of source entries per unit of information retained.
+    pub compression_ratio: f32,
+    /// Unix milliseconds when this fold was created.
+    pub fold_ts:           u64,
+}
+
+impl GixFold {
+    /// Create a `GixFold` from source canonical_ids.
+    pub fn new(sources: Vec<[u8; 32]>, compression_ratio: f32) -> Self {
+        let fold_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let id = gix_fold_v1(&sources);
+        Self { id, sources, compression_ratio, fold_ts }
+    }
+
+    /// Hex-encoded canonical_id for this fold.
+    pub fn canonical_id_hex(&self) -> String {
+        hex::encode(self.id)
+    }
+
+    /// Stamp a `Gix1` wire envelope for this fold node.
+    pub fn to_gix1(&self, namespace: GixNamespace, routing: RoutingHints) -> Gix1 {
+        Gix1::new(
+            GixKind::MemoryFold,
+            namespace,
+            &self.id,
+            None,
+            self.fold_ts,
+            routing,
+        )
+    }
+}
+
 // ── GIX-KDF-v1 domain-separated key derivation ───────────────────────────────
 
 const HKDF_SALT: &[u8] = b"GLYPHINDEX/v1";
@@ -522,5 +576,51 @@ mod envelope_tests {
         assert_eq!(env.odu_base, odu_base);
         assert_eq!(env.odu_composed, odu_composed);
         assert_eq!(env.glyph, glyph);
+    }
+
+    #[test]
+    fn gix_kind_memory_fold_roundtrips() {
+        let env = Gix1::new(
+            GixKind::MemoryFold,
+            GixNamespace::OmokodaAgent,
+            b"fold-test-payload",
+            None,
+            1_700_000_000_000,
+            RoutingHints::default(),
+        );
+        assert_eq!(env.kind, GixKind::MemoryFold);
+        assert!(env.verify_integrity());
+        let json = serde_json::to_string(&env.kind).unwrap();
+        assert_eq!(json, "\"memory_fold\"");
+        let decoded: GixKind = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, GixKind::MemoryFold);
+    }
+
+    #[test]
+    fn gix_fold_new_deterministic() {
+        let a = content_hash("entry-alpha");
+        let b = content_hash("entry-beta");
+        let f1 = GixFold::new(vec![a, b], 0.5);
+        let f2 = GixFold::new(vec![a, b], 0.5);
+        // id is gix_fold_v1 of sources — deterministic regardless of wall-clock
+        assert_eq!(f1.id, f2.id);
+        assert_eq!(f1.canonical_id_hex().len(), 64);
+        assert_eq!(f1.sources.len(), 2);
+    }
+
+    #[test]
+    fn gix_fold_to_gix1_stamps_memory_fold_kind() {
+        let sources = vec![content_hash("mem-1"), content_hash("mem-2")];
+        let fold = GixFold::new(sources, 0.33);
+        let env = fold.to_gix1(GixNamespace::OmokodaAgent, RoutingHints::default());
+        assert_eq!(env.kind, GixKind::MemoryFold);
+        assert!(env.verify_integrity());
+        // canonical_id = SHA-256(fold.id bytes) — Gix1::new hashes canonical_bytes
+        let expected: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(fold.id);
+            h.finalize().into()
+        };
+        assert_eq!(env.canonical_id, expected);
     }
 }
