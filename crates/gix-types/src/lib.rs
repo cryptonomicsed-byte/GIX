@@ -206,6 +206,36 @@ mod tests {
         assert_eq!(root.len(), 64);
     }
 
+    /// GIX-FOLD-v1 canonical cross-language conformance vectors.
+    ///
+    /// Frozen against the Python reference (Vantage/backend/glyph_index.py) and
+    /// the If-Script Rust implementation (If-Script/src/glyph/mod.rs). All three
+    /// implementations MUST produce identical results for these inputs.
+    ///
+    /// Vector format: (text, glyph_codepoint, odu_base, odu_composed)
+    const FOLD_VECTORS: &[(&str, u32, u8, u16)] = &[
+        ("Àṣẹ",              21841, 227, 58152),
+        ("hello",            23636,  44, 11506),
+        ("GlyphIndex",       13726,  68, 17595),
+        ("😊🚀 Unicode test", 64591, 189, 48626),
+        ("Ọ̀rúnmìlà",        17963, 204, 52390),
+    ];
+
+    #[test]
+    fn fold_matches_canonical_vectors() {
+        for (text, codepoint, base, composed) in FOLD_VECTORS {
+            let digest = content_hash(text);
+            assert_eq!(
+                glyph_fold(&digest) as u32, *codepoint,
+                "glyph_fold mismatch for {:?}", text
+            );
+            assert_eq!(
+                odu_link(&digest), (*base, *composed),
+                "odu_link mismatch for {:?}", text
+            );
+        }
+    }
+
     #[test]
     fn audit_round_trip() {
         let ids = ["a", "b", "c"];
