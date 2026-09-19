@@ -105,6 +105,40 @@ impl Gix1Index {
         let ids: Vec<&str> = self.entries.iter().map(|e| e.canonical_id.as_str()).collect();
         self.root = gix1_merkle_root(&ids);
     }
+
+    // ── persistence ───────────────────────────────────────────────────────────
+
+    /// Serialize the index to a JSON file at `path`.
+    ///
+    /// The stored JSON includes all `Gix1Entry` records, full `Gix1` envelopes,
+    /// and the Merkle root so an audit can be run immediately after loading.
+    pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), String> {
+        let path = path.as_ref();
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Gix1Index serialize error: {e}"))?;
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &json)
+            .map_err(|e| format!("Gix1Index write error ({}): {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("Gix1Index rename error: {e}"))
+    }
+
+    /// Load a `Gix1Index` from a JSON file at `path` and verify its Merkle root.
+    ///
+    /// Returns `Ok(Gix1Index::new())` if the file does not exist.
+    /// Returns `Err` if the file exists but fails to parse or the root is inconsistent.
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(Self::new());
+        }
+        let json = std::fs::read_to_string(path)
+            .map_err(|e| format!("Gix1Index read error ({}): {e}", path.display()))?;
+        let index: Self = serde_json::from_str(&json)
+            .map_err(|e| format!("Gix1Index deserialize error: {e}"))?;
+        index.audit()?;
+        Ok(index)
+    }
 }
 
 #[cfg(test)]
@@ -187,5 +221,51 @@ mod tests {
         assert_eq!(idx.by_namespace(&GixNamespace::OsovmExecution).len(), 1);
         assert_eq!(idx.by_namespace(&GixNamespace::MeshDevice).len(),     2);
         assert_eq!(idx.by_namespace(&GixNamespace::Mycelium).len(),       0);
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+
+        let mut idx = Gix1Index::new();
+        idx.insert_gix1(Gix1::new(GixKind::Receipt, GixNamespace::OsovmExecution, b"r1", None, 1_000, RoutingHints::default()));
+        idx.insert_gix1(Gix1::new(GixKind::Memory,  GixNamespace::OmokodaAgent,   b"m1", None, 2_000, RoutingHints::default()));
+        let root_before = idx.root().to_string();
+
+        idx.save(&path).expect("save should succeed");
+        assert!(path.exists());
+
+        let loaded = Gix1Index::load(&path).expect("load should succeed");
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.root(), root_before);
+        assert!(loaded.audit().is_ok());
+    }
+
+    #[test]
+    fn load_missing_file_returns_empty_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        let idx = Gix1Index::load(&path).expect("missing file should yield empty index");
+        assert!(idx.is_empty());
+        assert_eq!(idx.root(), gix_types::GIX1_EMPTY_ROOT);
+    }
+
+    #[test]
+    fn load_detects_tampered_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+
+        let mut idx = Gix1Index::new();
+        idx.add_receipt("rx-1", GixKind::Receipt, 0.0);
+        idx.save(&path).unwrap();
+
+        // Tamper: overwrite root in the JSON
+        let json = std::fs::read_to_string(&path).unwrap();
+        let tampered = json.replace(idx.root(), "deadbeefdeadbeef");
+        std::fs::write(&path, tampered).unwrap();
+
+        let result = Gix1Index::load(&path);
+        assert!(result.is_err(), "tampered root must be detected");
     }
 }
