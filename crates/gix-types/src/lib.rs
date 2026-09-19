@@ -269,6 +269,9 @@ pub enum GixNamespace {
     MeshDevice,
     Mycelium,
     IfScript,
+    /// Triune-Memory orchestrator namespace: episodic, semantic, and working
+    /// tier records routed through the 3-tier memory stack.
+    TriuneMemory,
     Custom(String),
 }
 
@@ -426,6 +429,87 @@ impl GixFold {
             &self.id,
             None,
             self.fold_ts,
+            routing,
+        )
+    }
+}
+
+// ── GixMemoryRef — GIX identity pointer into the Triune-Memory stack ─────────
+
+/// Which of the three memory tiers a `GixMemoryRef` points into.
+///
+/// Mirrors `omokoda_core::memory::engine::MemoryTier` at the protocol level
+/// so `gix-types` stays dependency-free. Conversion in `gix_bridge.rs`.
+///
+/// - `Working`  — high-churn session context (≤100 entries)
+/// - `Episodic` — think/act outcomes this session (≤500 entries)
+/// - `Semantic` — distilled patterns across sessions (≤200 entries)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GixMemoryTier {
+    Working,
+    Episodic,
+    Semantic,
+}
+
+/// A GIX identity pointer for a Triune-Memory entry.
+///
+/// Links a `GixNamespace::TriuneMemory` canonical_id to its tier location and
+/// fold depth within the REM compression hierarchy.
+///
+/// `fold_depth = 0` → raw, uncompressed `OduEntry`.
+/// `fold_depth > 0` → the entry was absorbed into a `GixFold` N levels deep.
+/// At depth 1 the entry's content is still addressable via the parent fold's
+/// `sources`; at depth 2 the fold itself was re-folded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GixMemoryRef {
+    /// GIX canonical_id (SHA-256 of the entry's canonical bytes).
+    pub canonical_id: [u8; 32],
+    /// GIX-FOLD-v1 deterministic Unicode glyph — quick visual fingerprint.
+    pub glyph:        char,
+    /// Odù base coordinate (digest[0]).
+    pub odu_base:     u8,
+    /// Which Triune-Memory tier this reference points into.
+    pub tier:         GixMemoryTier,
+    /// REM fold depth: 0 = raw entry, N = absorbed N levels into GixFold chain.
+    pub fold_depth:   u8,
+}
+
+impl GixMemoryRef {
+    /// Create a `GixMemoryRef` from the entry's canonical bytes.
+    pub fn new(canonical_bytes: &[u8], tier: GixMemoryTier, fold_depth: u8) -> Self {
+        let digest = {
+            let mut h = Sha256::new();
+            h.update(canonical_bytes);
+            h.finalize()
+        };
+        let digest: [u8; 32] = digest.into();
+        let (odu_base, _) = odu_link(&digest);
+        Self {
+            canonical_id: digest,
+            glyph:        glyph_fold(&digest),
+            odu_base,
+            tier,
+            fold_depth,
+        }
+    }
+
+    /// Hex-encoded canonical_id.
+    pub fn canonical_id_hex(&self) -> String {
+        hex::encode(self.canonical_id)
+    }
+
+    /// Stamp a `Gix1` wire envelope for this memory reference.
+    pub fn to_gix1(&self, routing: RoutingHints) -> Gix1 {
+        Gix1::new(
+            GixKind::Memory,
+            GixNamespace::TriuneMemory,
+            &self.canonical_id,
+            None,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
             routing,
         )
     }
@@ -622,5 +706,57 @@ mod envelope_tests {
             h.finalize().into()
         };
         assert_eq!(env.canonical_id, expected);
+    }
+
+    #[test]
+    fn gix_namespace_triune_memory_roundtrips() {
+        let json = serde_json::to_string(&GixNamespace::TriuneMemory).unwrap();
+        assert_eq!(json, "\"triune_memory\"");
+        let decoded: GixNamespace = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, GixNamespace::TriuneMemory);
+    }
+
+    #[test]
+    fn gix_memory_tier_serde_roundtrips() {
+        for (tier, expected) in [
+            (GixMemoryTier::Working,  "\"working\""),
+            (GixMemoryTier::Episodic, "\"episodic\""),
+            (GixMemoryTier::Semantic, "\"semantic\""),
+        ] {
+            let json = serde_json::to_string(&tier).unwrap();
+            assert_eq!(json, expected);
+            let decoded: GixMemoryTier = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, tier);
+        }
+    }
+
+    #[test]
+    fn gix_memory_ref_new_deterministic() {
+        let r1 = GixMemoryRef::new(b"hello memory", GixMemoryTier::Episodic, 0);
+        let r2 = GixMemoryRef::new(b"hello memory", GixMemoryTier::Episodic, 0);
+        assert_eq!(r1.canonical_id, r2.canonical_id);
+        assert_eq!(r1.glyph, r2.glyph);
+        assert_eq!(r1.canonical_id_hex().len(), 64);
+        assert_eq!(r1.tier, GixMemoryTier::Episodic);
+        assert_eq!(r1.fold_depth, 0);
+    }
+
+    #[test]
+    fn gix_memory_ref_to_gix1_uses_triune_namespace() {
+        let mref = GixMemoryRef::new(b"semantic pattern", GixMemoryTier::Semantic, 1);
+        let env = mref.to_gix1(RoutingHints::default());
+        assert_eq!(env.kind,      GixKind::Memory);
+        assert_eq!(env.namespace, GixNamespace::TriuneMemory);
+        assert!(env.verify_integrity());
+    }
+
+    #[test]
+    fn gix_memory_ref_fold_depth_zero_is_raw() {
+        let raw  = GixMemoryRef::new(b"entry", GixMemoryTier::Working, 0);
+        let fold = GixMemoryRef::new(b"entry", GixMemoryTier::Working, 2);
+        // Same canonical_id regardless of fold_depth (identity is content, not tier)
+        assert_eq!(raw.canonical_id, fold.canonical_id);
+        assert_eq!(raw.fold_depth, 0);
+        assert_eq!(fold.fold_depth, 2);
     }
 }
