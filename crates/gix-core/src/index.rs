@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use gix_types::{gix1_audit, gix1_merkle_root, Gix1, Gix1Entry, GixKind, GIX1_EMPTY_ROOT};
+use gix_types::{gix1_audit, gix1_merkle_root, Gix1, Gix1Entry, GixKind, GixNamespace, GIX1_EMPTY_ROOT};
 
 /// In-memory GIX1 index with Merkle root tracking and full-envelope lookup.
 ///
@@ -82,6 +82,19 @@ impl Gix1Index {
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     pub fn entries(&self) -> &[Gix1Entry] { &self.entries }
 
+    /// Return all entries matching the given `GixKind`.
+    pub fn by_kind(&self, kind: &GixKind) -> Vec<&Gix1Entry> {
+        self.entries.iter().filter(|e| &e.kind == kind).collect()
+    }
+
+    /// Return all full envelopes matching the given `GixNamespace`.
+    ///
+    /// Only envelopes inserted via [`insert_gix1`] are available here;
+    /// entries added via [`add_receipt`] or [`insert`] have no full envelope.
+    pub fn by_namespace(&self, ns: &GixNamespace) -> Vec<&Gix1> {
+        self.envelopes.values().filter(|e| &e.namespace == ns).collect()
+    }
+
     /// Verify this index's stored root is consistent with its entries.
     pub fn audit(&self) -> Result<String, String> {
         let ids: Vec<&str> = self.entries.iter().map(|e| e.canonical_id.as_str()).collect();
@@ -149,5 +162,30 @@ mod tests {
             RoutingHints::default(),
         ));
         assert_ne!(idx.root(), empty_root);
+    }
+
+    #[test]
+    fn by_kind_filters_correctly() {
+        let mut idx = Gix1Index::new();
+        idx.insert_gix1(Gix1::new(GixKind::Receipt,    GixNamespace::OsovmExecution, b"r1", None, 0, RoutingHints::default()));
+        idx.insert_gix1(Gix1::new(GixKind::Physical,   GixNamespace::MeshDevice,     b"d1", None, 0, RoutingHints::default()));
+        idx.insert_gix1(Gix1::new(GixKind::Simulation, GixNamespace::OsovmExecution, b"s1", None, 0, RoutingHints::default()));
+
+        assert_eq!(idx.by_kind(&GixKind::Receipt).len(),    1);
+        assert_eq!(idx.by_kind(&GixKind::Physical).len(),   1);
+        assert_eq!(idx.by_kind(&GixKind::Simulation).len(), 1);
+        assert_eq!(idx.by_kind(&GixKind::Memory).len(),     0);
+    }
+
+    #[test]
+    fn by_namespace_filters_correctly() {
+        let mut idx = Gix1Index::new();
+        idx.insert_gix1(Gix1::new(GixKind::Receipt,  GixNamespace::OsovmExecution, b"e1", None, 0, RoutingHints::default()));
+        idx.insert_gix1(Gix1::new(GixKind::Physical, GixNamespace::MeshDevice,     b"d1", None, 0, RoutingHints::default()));
+        idx.insert_gix1(Gix1::new(GixKind::Receipt,  GixNamespace::MeshDevice,     b"d2", None, 0, RoutingHints::default()));
+
+        assert_eq!(idx.by_namespace(&GixNamespace::OsovmExecution).len(), 1);
+        assert_eq!(idx.by_namespace(&GixNamespace::MeshDevice).len(),     2);
+        assert_eq!(idx.by_namespace(&GixNamespace::Mycelium).len(),       0);
     }
 }
