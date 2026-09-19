@@ -7,9 +7,12 @@
 //! GIX-FOLD-v1: content-addressed memory chunks → deterministic Unicode glyph.
 //! GIX1 audit: Merkle root over canonical_ids.
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ── GIX-FOLD-v1 glyph encoding ───────────────────────────────────────────────
 
@@ -217,5 +220,277 @@ mod tests {
         let n2 = GlyphNode::from_chunk("hello sovereign", 0.0);
         assert_eq!(n1.canonical_id, n2.canonical_id);
         assert_eq!(n1.glyph, n2.glyph);
+    }
+}
+
+// ── GIX1 wire envelope ────────────────────────────────────────────────────────
+
+/// Ecosystem scope — which subsystem's namespace a GIX object belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GixNamespace {
+    OmokodaAgent,
+    VantageRegistry,
+    OsovmExecution,
+    ArpReceipt,
+    MeshDevice,
+    Mycelium,
+    IfScript,
+    Custom(String),
+}
+
+/// Optional routing hints — DIP NetworkRepr addresses where the object can be found.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoutingHints {
+    pub primary:  Option<String>,
+    pub fallback: Vec<String>,
+}
+
+/// Integrity metadata — SHA-256 of the canonical serialisation of all other Gix1 fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityMeta {
+    pub envelope_hash: [u8; 32],
+}
+
+/// GIX1 wire envelope — cross-system identity wrapper for any indexable object.
+///
+/// `canonical_id` is the cryptographic root (SHA-256 of the object's canonical bytes).
+/// Odù coordinates are *projections* derived from the digest; they are NOT the identity.
+/// Use [`Gix1::new`] to construct — this computes the integrity hash automatically.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Gix1 {
+    pub version:      u8,
+    pub kind:         GixKind,
+    pub namespace:    GixNamespace,
+    pub canonical_id: [u8; 32],
+    pub glyph:        char,
+    pub odu_base:     u8,
+    pub odu_composed: u16,
+    pub provenance:   Option<[u8; 32]>,
+    pub created_at:   u64,             // unix milliseconds
+    pub routing:      RoutingHints,
+    pub integrity:    IntegrityMeta,
+}
+
+impl Gix1 {
+    /// Construct a `Gix1` envelope from the object's canonical bytes.
+    ///
+    /// `canonical_bytes` should be the serialised form of the wrapped object.
+    /// `created_at_ms` is the creation timestamp in Unix milliseconds.
+    pub fn new(
+        kind: GixKind,
+        namespace: GixNamespace,
+        canonical_bytes: &[u8],
+        provenance: Option<[u8; 32]>,
+        created_at_ms: u64,
+        routing: RoutingHints,
+    ) -> Self {
+        let mut h = Sha256::new();
+        h.update(canonical_bytes);
+        let digest: [u8; 32] = h.finalize().into();
+
+        let (odu_base, odu_composed) = odu_link(&digest);
+        let glyph = glyph_fold(&digest);
+
+        let mut env = Self {
+            version: 1,
+            kind,
+            namespace,
+            canonical_id: digest,
+            glyph,
+            odu_base,
+            odu_composed,
+            provenance,
+            created_at: created_at_ms,
+            routing,
+            integrity: IntegrityMeta { envelope_hash: [0u8; 32] },
+        };
+        env.integrity.envelope_hash = env.compute_envelope_hash();
+        env
+    }
+
+    /// Re-verify the stored envelope_hash matches the current field values.
+    pub fn verify_integrity(&self) -> bool {
+        self.integrity.envelope_hash == self.compute_envelope_hash()
+    }
+
+    fn compute_envelope_hash(&self) -> [u8; 32] {
+        // Serialise all fields except integrity itself, then SHA-256.
+        let mut h = Sha256::new();
+        h.update([self.version]);
+        h.update(format!("{:?}", self.kind).as_bytes());
+        h.update(format!("{:?}", self.namespace).as_bytes());
+        h.update(self.canonical_id);
+        h.update(self.glyph.to_string().as_bytes());
+        h.update([self.odu_base]);
+        h.update(self.odu_composed.to_be_bytes());
+        if let Some(p) = &self.provenance {
+            h.update(p);
+        }
+        h.update(self.created_at.to_be_bytes());
+        h.update(self.routing.primary.as_deref().unwrap_or(""));
+        h.finalize().into()
+    }
+}
+
+// ── GIX-FOLD-v1 composite identity ───────────────────────────────────────────
+
+/// Fold multiple canonical_ids into a single composite identity.
+///
+/// SHA-256 of their concatenation in order. Order matters: this operation is
+/// NOT commutative (task + execution ≠ execution + task).
+pub fn gix_fold_v1(inputs: &[[u8; 32]]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    for id in inputs {
+        h.update(id);
+    }
+    h.finalize().into()
+}
+
+// ── GIX-KDF-v1 domain-separated key derivation ───────────────────────────────
+
+const HKDF_SALT: &[u8] = b"GLYPHINDEX/v1";
+
+/// Domain labels for `gix_kdf_v1`.
+///
+/// Each domain derives a DIFFERENT key from the same `canonical_id` root.
+/// KDF outputs are key material only — never stored as identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GixDomain {
+    Memory,
+    Mesh,
+    Receipt,
+    AgentKey,
+    Encryption,
+    Duress,
+}
+
+impl GixDomain {
+    fn label(self) -> &'static [u8] {
+        match self {
+            GixDomain::Memory     => b"gix:memory:",
+            GixDomain::Mesh       => b"gix:mesh:",
+            GixDomain::Receipt    => b"gix:receipt:",
+            GixDomain::AgentKey   => b"gix:agent:",
+            GixDomain::Encryption => b"gix:enc:",
+            GixDomain::Duress     => b"gix:duress:",
+        }
+    }
+}
+
+/// GIX-KDF-v1: derive 32-byte domain-specific key material from a canonical_id.
+///
+/// Uses HKDF-SHA256 with `salt = b"GLYPHINDEX/v1"`.
+/// `info = domain_label + owner_bytes + context`.
+///
+/// Critical invariant: `gix_kdf_v1()` output is NEVER stored as identity.
+/// A `canonical_id` and its KDF outputs must never be used interchangeably.
+pub fn gix_kdf_v1(
+    canonical_id: &[u8; 32],
+    domain: GixDomain,
+    owner: &[u8],
+    context: &[u8],
+) -> [u8; 32] {
+    // HKDF-Extract
+    let mut mac = HmacSha256::new_from_slice(HKDF_SALT)
+        .expect("HMAC accepts any key length");
+    mac.update(canonical_id);
+    let prk = mac.finalize().into_bytes();
+
+    // Build info = domain_label + owner + ":" + context
+    let mut info = Vec::with_capacity(domain.label().len() + owner.len() + 1 + context.len());
+    info.extend_from_slice(domain.label());
+    info.extend_from_slice(owner);
+    info.push(b':');
+    info.extend_from_slice(context);
+
+    // HKDF-Expand (one 32-byte block is enough for 256-bit keys)
+    let mut mac2 = HmacSha256::new_from_slice(&prk)
+        .expect("HMAC accepts any key length");
+    mac2.update(&info);
+    mac2.update(&[1u8]);
+    mac2.finalize().into_bytes().into()
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::*;
+
+    #[test]
+    fn gix1_new_integrity_valid() {
+        let env = Gix1::new(
+            GixKind::Receipt,
+            GixNamespace::ArpReceipt,
+            b"test-receipt-payload",
+            None,
+            1_700_000_000_000,
+            RoutingHints::default(),
+        );
+        assert_eq!(env.version, 1);
+        assert!(env.verify_integrity());
+    }
+
+    #[test]
+    fn gix1_canonical_id_from_bytes() {
+        let payload = b"hello sovereign";
+        let env = Gix1::new(
+            GixKind::Memory,
+            GixNamespace::OmokodaAgent,
+            payload,
+            None,
+            0,
+            RoutingHints::default(),
+        );
+        // canonical_id must equal SHA-256 of the payload
+        let expected: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(payload);
+            h.finalize().into()
+        };
+        assert_eq!(env.canonical_id, expected);
+    }
+
+    #[test]
+    fn gix_fold_v1_deterministic_and_order_dependent() {
+        let a = content_hash("alpha");
+        let b = content_hash("beta");
+        let ab = gix_fold_v1(&[a, b]);
+        let ba = gix_fold_v1(&[b, a]);
+        assert_eq!(ab, gix_fold_v1(&[a, b]), "fold must be deterministic");
+        assert_ne!(ab, ba, "fold must be order-dependent");
+    }
+
+    #[test]
+    fn gix_kdf_v1_domain_separation() {
+        let id = content_hash("agent-123");
+        let enc    = gix_kdf_v1(&id, GixDomain::Encryption, b"owner", b"ctx");
+        let duress = gix_kdf_v1(&id, GixDomain::Duress,     b"owner", b"ctx");
+        assert_ne!(enc, duress, "enc and duress domains must produce different keys");
+    }
+
+    #[test]
+    fn gix_kdf_v1_deterministic() {
+        let id = content_hash("test-agent");
+        let k1 = gix_kdf_v1(&id, GixDomain::Memory, b"alice", b"purpose");
+        let k2 = gix_kdf_v1(&id, GixDomain::Memory, b"alice", b"purpose");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn odu_and_glyph_from_envelope_match_primitives() {
+        let payload = "\u{00C0}\u{1E63}\u{1EB9}".as_bytes(); // Àṣẹ as UTF-8
+        let env = Gix1::new(
+            GixKind::Memory,
+            GixNamespace::OmokodaAgent,
+            payload,
+            None,
+            0,
+            RoutingHints::default(),
+        );
+        let (odu_base, odu_composed) = odu_link(&env.canonical_id);
+        let glyph = glyph_fold(&env.canonical_id);
+        assert_eq!(env.odu_base, odu_base);
+        assert_eq!(env.odu_composed, odu_composed);
+        assert_eq!(env.glyph, glyph);
     }
 }

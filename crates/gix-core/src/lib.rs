@@ -14,4 +14,6 @@ pub use gix_types::{
     GlyphNode, GlyphEdge, GixKind, Gix1Entry,
     gix1_audit, gix1_merkle_root, merkle_root, GIX1_EMPTY_ROOT,
     content_hash, glyph_fold, odu_link,
+    Gix1, GixNamespace, RoutingHints, IntegrityMeta,
+    gix_fold_v1, gix_kdf_v1, GixDomain,
 };
