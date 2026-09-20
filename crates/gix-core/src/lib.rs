@@ -7,9 +7,14 @@
 
 pub mod graph;
 pub mod index;
+pub mod store;
 
 pub use graph::GlyphGraph;
 pub use index::Gix1Index;
+pub use store::{
+    CanonicalObjectStore, GixSnapshotMeta,
+    load_store_from_files, save_store_to_files,
+};
 pub use gix_types::{
     GlyphNode, GlyphEdge, GixKind, Gix1Entry,
     gix1_audit, gix1_merkle_root, merkle_root, GIX1_EMPTY_ROOT,
